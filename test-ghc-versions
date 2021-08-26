@@ -1,0 +1,20 @@
+#! /bin/sh
+
+set -ueo pipefail
+
+VERSIONS=$(cat <<EOF
+    9_2_1-rc1
+EOF
+)
+
+SEP="------------------------------------------------------------"
+
+for version in $VERSIONS; do
+    echo $SEP
+    nix-shell \
+	--pure \
+	--argstr ghc "$version" \
+	--run "ghc --version; cabal test"
+done
+
+echo $SEP
