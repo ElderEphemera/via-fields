@@ -50,5 +50,5 @@ where `ViaFields.Util.Coerced` is a pattern synonym that applies
 
 ## Limitations
 
-Because of the way the plugin works derived `Show` instances are a complete
+Because of the way the plugin works, derived `Show` instances are a complete
 mess.
