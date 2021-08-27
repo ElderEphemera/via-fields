@@ -20,8 +20,8 @@ data T a b = T (Int via Sum Int) String a (b via Product b)
 
 ## Supported GHC Versions
 
-Currently only GHC 9.2.1-rc1 is supported but support for older version should
-be coming soon.
+Currently GHC versions 9.0.1 and 9.2.1-rc1 are supported but support for older
+versions should be coming soon.
 
 ## Implementation
 

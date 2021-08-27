@@ -1,28 +1,39 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
 
 module ViaFields (plugin) where
 
 import qualified Data.Generics as G
+#if __GLASGOW_HASKELL__ >= 902
+import Data.Void
+#endif
 
 import GHC.Hs
+#if __GLASGOW_HASKELL__ >= 902
 import GHC.LanguageExtensions.Type
+#endif
+#if __GLASGOW_HASKELL__ < 902
+import GHC.Parser.Annotation
+#endif
 import GHC.Plugins
 import GHC.Types.Name.Occurrence as NS
+#if __GLASGOW_HASKELL__ >= 902
 import GHC.Types.SourceText
+#endif
 
 --------------------------------------------------------------------------------
 
 plugin :: Plugin
 plugin = defaultPlugin
-  { driverPlugin = \_opts -> pure . addExts
-  , parsedResultAction = \_opts _summary -> pure . desugarMod
+  { parsedResultAction = \_opts _summary -> pure . desugarMod
   , pluginRecompile = purePlugin
+#if __GLASGOW_HASKELL__ >= 902
+  , driverPlugin = \_opts env -> pure $ env
+    { hsc_dflags = xopt_set (hsc_dflags env) PatternSynonyms }
+#endif
   }
-
-addExts :: HscEnv -> HscEnv
-addExts env@(HscEnv { hsc_dflags = dflags }) =
-  env { hsc_dflags = xopt_set dflags PatternSynonyms }
 
 --------------------------------------------------------------------------------
 
@@ -78,39 +89,63 @@ desugarArg (HsScaled arr ty) =
 --------------------------------------------------------------------------------
 
 makeComplete :: [LIdP GhcPs] -> LHsDecl GhcPs
-makeComplete pats = gen . SigD noExtField $
-  CompleteMatchSig EpAnnNotUsed NoSourceText (genL pats) Nothing
+makeComplete pats = gen . SigD nef $
+  CompleteMatchSig eanu NoSourceText (genL pats) Nothing
+
+#if __GLASGOW_HASKELL__ < 902
+type HsConDetails' = HsConDetails
+type HsPatSynDetails' pass =
+  HsConDetails' (LIdP pass) [RecordPatSynField (LIdP pass)]
+#else
+type HsConDetails' = HsConDetails Void
+type HsPatSynDetails' pass = HsConDetails' (LIdP pass) [RecordPatSynField pass]
+#endif
+
+#if __GLASGOW_HASKELL__ < 902
+pattern PrefixCon' :: [arg] -> HsConDetails arg rec
+pattern PrefixCon' args = PrefixCon args
+#else
+pattern PrefixCon' :: [arg] -> HsConDetails tyarg arg rec
+pattern PrefixCon' args <- PrefixCon _ args
+  where PrefixCon' args = PrefixCon [] args
+#endif
+
+{-# COMPLETE PrefixCon', RecCon, InfixCon #-}
 
 makePats
   :: LIdP GhcPs -> LHsQTyVars GhcPs
-  -> [LIdP GhcPs] -> HsPatSynDetails GhcPs -> [ConArg] -> [LHsDecl GhcPs]
+  -> [LIdP GhcPs] -> HsPatSynDetails' GhcPs -> [ConArg] -> [LHsDecl GhcPs]
 makePats tc tvs cons dets args
-  = ( gen . SigD noExtField . PatSynSig EpAnnNotUsed cons
-    . gen . HsSig noExtField (HsOuterImplicit noExtField)
+  = ( gen . SigD nef . PatSynSig eanu cons
+#if __GLASGOW_HASKELL__ < 902
+    . HsIB nef
+#else
+    . gen . HsSig nef (HsOuterImplicit nef)
+#endif
     . gen $ makePatType tc tvs args )
   : map (\con -> makePat con dets args) cons
 
 makePatType :: LIdP GhcPs -> LHsQTyVars GhcPs -> [ConArg] -> HsType GhcPs
 makePatType tc
   = foldr
-     (\a -> HsFunTy EpAnnNotUsed (HsUnrestrictedArrow NormalSyntax) (ca_type a)
+     (\a -> HsFunTy eanu (HsUnrestrictedArrow NormalSyntax) (ca_type a)
           . gen)
   . foldl
-      (\f -> HsAppTy noExtField (gen f) . gen
-           . HsTyVar EpAnnNotUsed NotPromoted
+      (\f -> HsAppTy nef (gen f) . gen
+           . HsTyVar eanu NotPromoted
            . bndrVar . unLoc)
-      (HsTyVar EpAnnNotUsed NotPromoted tc)
+      (HsTyVar eanu NotPromoted tc)
   . hsq_explicit
 
-makePat :: LIdP GhcPs -> HsPatSynDetails GhcPs -> [ConArg] -> LHsDecl GhcPs
+makePat :: LIdP GhcPs -> HsPatSynDetails' GhcPs -> [ConArg] -> LHsDecl GhcPs
 makePat con dets args
-  = gen . ValD noExtField . PatSynBind noExtField
-  $ PSB EpAnnNotUsed con dets
-    (gen . ConPat EpAnnNotUsed (mangle con) . PrefixCon [] $ zipWith
+  = gen . ValD nef . PatSynBind nef
+  $ PSB eanu con dets
+    (gen . ConPat eanu (mangle con) . PrefixCon' $ zipWith
       (\(ConArg { ca_via = via }) var -> gen $
-        let varPat = VarPat noExtField var in
+        let varPat = VarPat nef var in
         if via
-        then ConPat EpAnnNotUsed coerced $ PrefixCon [] [gen varPat]
+        then ConPat eanu coerced $ PrefixCon' [gen varPat]
         else varPat) args vars)
     ImplicitBidirectional
 
@@ -131,20 +166,34 @@ modifyConNames f con@(ConDeclGADT { con_names = names }) =
 modifyConNames f con@(ConDeclH98 { con_name = name }) =
   con { con_name = f name }
 
+#if __GLASGOW_HASKELL__ < 902
+type HsConDeclH98Details pass = HsConDeclDetails pass
+#else
 gadtToH98 :: HsConDeclGADTDetails GhcPs -> HsConDeclH98Details GhcPs
 gadtToH98 (PrefixConGADT args) = PrefixCon [] args
 gadtToH98 (RecConGADT fields) = RecCon fields
+#endif
 
-conPatArgs' :: HsConDeclH98Details GhcPs -> HsPatSynDetails GhcPs
-conPatArgs' (PrefixCon _ args) = PrefixCon [] $ zipWith const vars args
-conPatArgs' (RecCon (L _ fields)) = RecCon $
-  zipWith (RecordPatSynField . unLoc)
-  (concatMap (cd_fld_names . unLoc) fields) vars
+conPatArgs' :: HsConDeclH98Details GhcPs -> HsPatSynDetails' GhcPs
+conPatArgs' (PrefixCon' args) = PrefixCon' $ zipWith const vars args
+conPatArgs' (RecCon (L _ fields)) = RecCon
+  $ zipWith (RecordPatSynField . nameField . unLoc)
+    (concatMap (cd_fld_names . unLoc) fields) vars
+  where
+#if __GLASGOW_HASKELL__ < 902
+    nameField = rdrNameFieldOcc
+#else
+    nameField = id
+#endif
 conPatArgs' (InfixCon _ _) = InfixCon (vars!!0) (vars!!1)
 
-conPatArgs :: ConDecl GhcPs -> HsPatSynDetails GhcPs
+conPatArgs :: ConDecl GhcPs -> HsPatSynDetails' GhcPs
+#if __GLASGOW_HASKELL__ < 902
+conPatArgs = conPatArgs' . con_args
+#else
 conPatArgs (ConDeclGADT { con_g_args = args }) = conPatArgs' $ gadtToH98 args
 conPatArgs (ConDeclH98 { con_args = args }) = conPatArgs' args
+#endif
 
 vars :: [LIdP GhcPs]
 vars = gen . mkUnqual NS.varName . mangleFS . fsLit . show <$> [(0::Int)..]
@@ -170,7 +219,7 @@ bndrVar (KindedTyVar _ _ var _) = var
 
 mkImport :: ModuleName -> LImportDecl GhcPs
 mkImport modName = gen $ ImportDecl
-  { ideclExt = EpAnnNotUsed
+  { ideclExt = eanu
   , ideclSourceSrc = NoSourceText
   , ideclName = genL modName
   , ideclPkgQual = Nothing
@@ -211,21 +260,36 @@ splitHsAppTys (L _ (HsParTy _ t)) = splitHsAppTys t
 splitHsAppTys ty = (ty, [])
 
 hsAppTys :: LHsType GhcPs -> [LHsType GhcPs] -> LHsType GhcPs
-hsAppTys f = gen . HsParTy EpAnnNotUsed . foldl app f
+hsAppTys f = gen . HsParTy eanu . foldl app f
 
 app :: LHsType GhcPs -> LHsType GhcPs -> LHsType GhcPs
-app f x = gen $ HsAppTy noExtField f x
+app f x = gen $ HsAppTy nef f x
 
 --------------------------------------------------------------------------------
 
+#if __GLASGOW_HASKELL__ < 902
+gen :: a -> Located a
+gen = genL
+#else
 gen :: a -> GenLocated (SrcSpanAnn' (EpAnn ann)) a
-gen = L genSrcSpanAnn
+gen = L $ SrcSpanAnn EpAnnNotUsed genSrcSpan
+#endif
 
 genL :: a -> Located a
 genL = L genSrcSpan
 
-genSrcSpanAnn :: SrcSpanAnn' (EpAnn ann)
-genSrcSpanAnn = SrcSpanAnn EpAnnNotUsed genSrcSpan
-
 genSrcSpan :: SrcSpan
 genSrcSpan = mkGeneralSrcSpan "<generated by via-fields>"
+
+--------------------------------------------------------------------------------
+
+#if __GLASGOW_HASKELL__ < 902
+eanu :: NoExtField
+eanu = noExtField
+#else
+eanu :: EpAnn a
+eanu = EpAnnNotUsed
+#endif
+
+nef :: NoExtField
+nef = noExtField

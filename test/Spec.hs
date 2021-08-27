@@ -1,9 +1,13 @@
 {-# OPTIONS_GHC -fplugin=ViaFields #-}
 
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE InstanceSigs #-}
+#if __GLASGOW_HASKELL__ < 920
+{-# LANGUAGE PatternSynonyms #-}
+#endif
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
 
