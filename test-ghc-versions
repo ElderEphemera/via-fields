@@ -3,6 +3,12 @@
 set -ueo pipefail
 
 VERSIONS=$(cat <<EOF
+    8_10_1
+    8_10_3
+    8_10_4
+    8_10_5
+    8_10_6
+    8_10_7
     9_0_1
     9_2_1-rc1
 EOF

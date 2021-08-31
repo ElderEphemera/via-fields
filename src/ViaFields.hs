@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module ViaFields (plugin) where
 
@@ -11,6 +12,10 @@ import Data.Void
 #endif
 
 import GHC.Hs
+#if __GLASGOW_HASKELL__ < 900
+import GhcPlugins
+import OccName as NS
+#else
 #if __GLASGOW_HASKELL__ >= 902
 import GHC.LanguageExtensions.Type
 #endif
@@ -21,6 +26,7 @@ import GHC.Plugins
 import GHC.Types.Name.Occurrence as NS
 #if __GLASGOW_HASKELL__ >= 902
 import GHC.Types.SourceText
+#endif
 #endif
 
 --------------------------------------------------------------------------------
@@ -59,14 +65,41 @@ desugarCon
   :: LIdP GhcPs -> LHsQTyVars GhcPs
   -> ConDecl GhcPs -> (([LHsDecl GhcPs], [LIdP GhcPs]), ConDecl GhcPs)
 desugarCon tc tvs con =
-  let (args, con')
-        =   G.everywhereM (G.mkM desugarArg)
-        =<< G.everywhereM (G.mkM desugarField) con
+  let (args, con') = desugarVias con
       anyVia = any ca_via args
       con'' = if anyVia then mangleFields $ modifyConNames mangle con' else con'
       names = conNames con
       pats = if anyVia then makePats tc tvs names (conPatArgs con) args else []
   in ((pats, names), con'')
+
+desugarVias :: ConDecl GhcPs -> ([ConArg], ConDecl GhcPs)
+#if __GLASGOW_HASKELL__ >= 902
+desugarVias con@ConDeclGADT{} =
+  (\args -> con { con_g_args = args }) <$> desugarDetailsGADT (con_g_args con)
+#endif
+desugarVias con =
+  (\args -> con { con_args = args }) <$> desugarDetails (con_args con)
+
+#if __GLASGOW_HASKELL__ < 902
+desugarDetails :: HsConDeclDetails GhcPs -> ([ConArg], HsConDeclDetails GhcPs)
+#else
+desugarDetails
+  :: HsConDeclH98Details GhcPs -> ([ConArg], HsConDeclH98Details GhcPs)
+#endif
+desugarDetails (PrefixCon' args) = PrefixCon' <$> traverse desugarArg args
+desugarDetails (RecCon fields) =
+  RecCon <$> (traverse.traverse.traverse) desugarField fields
+desugarDetails (InfixCon larg rarg) =
+  InfixCon <$> desugarArg larg <*> desugarArg rarg
+
+#if __GLASGOW_HASKELL__ >= 902
+desugarDetailsGADT
+  :: HsConDeclGADTDetails GhcPs -> ([ConArg], HsConDeclGADTDetails GhcPs)
+desugarDetailsGADT (PrefixConGADT args) =
+  PrefixConGADT <$> traverse desugarArg args
+desugarDetailsGADT (RecConGADT fields) =
+  RecConGADT <$> (traverse.traverse.traverse) desugarField fields
+#endif
 
 desugarField :: ConDeclField GhcPs -> ([ConArg], ConDeclField GhcPs)
 desugarField field@(ConDeclField { cd_fld_names = names, cd_fld_type = ty }) =
@@ -77,6 +110,9 @@ desugarField field@(ConDeclField { cd_fld_names = names, cd_fld_type = ty }) =
       ( mkArgs ty' True
       , field { cd_fld_type = tyVia }
       )
+#if __GLASGOW_HASKELL__ < 900
+desugarField (XConDeclField ext) = noExtCon ext
+#endif
 
 desugarArg
   :: HsScaled GhcPs (LBangType GhcPs)
@@ -88,18 +124,37 @@ desugarArg (HsScaled arr ty) =
 
 --------------------------------------------------------------------------------
 
+#if __GLASGOW_HASKELL__ < 900
+type HsScaled pass a = a
+
+pattern HsScaled :: () -> a -> HsScaled pass a
+pattern HsScaled u x <- ((,) () -> (u,x))
+  where HsScaled () x = x
+
+{-# COMPLETE HsScaled :: GenLocated #-}
+#endif
+
+hsFunTy :: LHsType GhcPs -> LHsType GhcPs -> HsType GhcPs
+#if __GLASGOW_HASKELL__ < 900
+hsFunTy = HsFunTy eanu
+#else
+hsFunTy = HsFunTy eanu (HsUnrestrictedArrow NormalSyntax)
+#endif
+
+--------------------------------------------------------------------------------
+
 makeComplete :: [LIdP GhcPs] -> LHsDecl GhcPs
 makeComplete pats = gen . SigD nef $
   CompleteMatchSig eanu NoSourceText (genL pats) Nothing
 
 #if __GLASGOW_HASKELL__ < 902
 type HsConDetails' = HsConDetails
-type HsPatSynDetails' pass =
-  HsConDetails' (LIdP pass) [RecordPatSynField (LIdP pass)]
+type RecordPatSynField' pass = RecordPatSynField (LIdP pass)
 #else
 type HsConDetails' = HsConDetails Void
-type HsPatSynDetails' pass = HsConDetails' (LIdP pass) [RecordPatSynField pass]
+type RecordPatSynField' = RecordPatSynField
 #endif
+type HsPatSynDetails' pass = HsConDetails' (LIdP pass) [RecordPatSynField' pass]
 
 #if __GLASGOW_HASKELL__ < 902
 pattern PrefixCon' :: [arg] -> HsConDetails arg rec
@@ -111,6 +166,13 @@ pattern PrefixCon' args <- PrefixCon _ args
 #endif
 
 {-# COMPLETE PrefixCon', RecCon, InfixCon #-}
+
+conPat :: LIdP GhcPs -> HsConPatDetails GhcPs -> Pat GhcPs
+#if __GLASGOW_HASKELL__ < 900
+conPat = ConPatIn
+#else
+conPat = ConPat eanu
+#endif
 
 makePats
   :: LIdP GhcPs -> LHsQTyVars GhcPs
@@ -128,7 +190,7 @@ makePats tc tvs cons dets args
 makePatType :: LIdP GhcPs -> LHsQTyVars GhcPs -> [ConArg] -> HsType GhcPs
 makePatType tc
   = foldr
-     (\a -> HsFunTy eanu (HsUnrestrictedArrow NormalSyntax) (ca_type a)
+     (\a -> hsFunTy (ca_type a)
           . gen)
   . foldl
       (\f -> HsAppTy nef (gen f) . gen
@@ -141,11 +203,11 @@ makePat :: LIdP GhcPs -> HsPatSynDetails' GhcPs -> [ConArg] -> LHsDecl GhcPs
 makePat con dets args
   = gen . ValD nef . PatSynBind nef
   $ PSB eanu con dets
-    (gen . ConPat eanu (mangle con) . PrefixCon' $ zipWith
+    (gen . conPat (mangle con) . PrefixCon' $ zipWith
       (\(ConArg { ca_via = via }) var -> gen $
         let varPat = VarPat nef var in
         if via
-        then ConPat eanu coerced $ PrefixCon' [gen varPat]
+        then conPat coerced $ PrefixCon' [gen varPat]
         else varPat) args vars)
     ImplicitBidirectional
 
@@ -159,12 +221,18 @@ data ConArg = ConArg
 conNames :: ConDecl GhcPs -> [LIdP GhcPs]
 conNames (ConDeclGADT { con_names = names }) = names
 conNames (ConDeclH98 { con_name = name }) = [name]
+#if __GLASGOW_HASKELL__ < 900
+conNames (XConDecl ext) = noExtCon ext
+#endif
 
 modifyConNames :: (LIdP GhcPs -> LIdP GhcPs) -> ConDecl GhcPs -> ConDecl GhcPs
 modifyConNames f con@(ConDeclGADT { con_names = names }) =
   con { con_names = map f names }
 modifyConNames f con@(ConDeclH98 { con_name = name }) =
   con { con_name = f name }
+#if __GLASGOW_HASKELL__ < 900
+modifyConNames _ (XConDecl ext) = noExtCon ext
+#endif
 
 #if __GLASGOW_HASKELL__ < 902
 type HsConDeclH98Details pass = HsConDeclDetails pass
@@ -187,13 +255,16 @@ conPatArgs' (RecCon (L _ fields)) = RecCon
 #endif
 conPatArgs' (InfixCon _ _) = InfixCon (vars!!0) (vars!!1)
 
-conPatArgs :: ConDecl GhcPs -> HsPatSynDetails' GhcPs
+conArgs :: ConDecl GhcPs -> HsConDeclH98Details GhcPs
 #if __GLASGOW_HASKELL__ < 902
-conPatArgs = conPatArgs' . con_args
+conArgs = con_args
 #else
-conPatArgs (ConDeclGADT { con_g_args = args }) = conPatArgs' $ gadtToH98 args
-conPatArgs (ConDeclH98 { con_args = args }) = conPatArgs' args
+conArgs (ConDeclGADT { con_g_args = args }) = gadtToH98 args
+conArgs (ConDeclH98 { con_args = args }) = args
 #endif
+
+conPatArgs :: ConDecl GhcPs -> HsPatSynDetails' GhcPs
+conPatArgs = conPatArgs' . conArgs
 
 vars :: [LIdP GhcPs]
 vars = gen . mkUnqual NS.varName . mangleFS . fsLit . show <$> [(0::Int)..]
@@ -211,9 +282,16 @@ mangleOcc occ = mkOccNameFS (occNameSpace occ) . mangleFS $ occNameFS occ
 mangleFS :: FastString -> FastString
 mangleFS = ("_via-fields$" Prelude.<>)
 
+#if __GLASGOW_HASKELL__ < 900
+bndrVar :: HsTyVarBndr GhcPs -> LIdP GhcPs
+bndrVar (UserTyVar _ var) = var
+bndrVar (KindedTyVar _ var _) = var
+bndrVar (XTyVarBndr ext) = noExtCon ext
+#else
 bndrVar :: HsTyVarBndr flag GhcPs -> LIdP GhcPs
 bndrVar (UserTyVar _ _ var) = var
 bndrVar (KindedTyVar _ _ var _) = var
+#endif
 
 --------------------------------------------------------------------------------
 
@@ -223,7 +301,11 @@ mkImport modName = gen $ ImportDecl
   , ideclSourceSrc = NoSourceText
   , ideclName = genL modName
   , ideclPkgQual = Nothing
+#if __GLASGOW_HASKELL__ < 900
+  , ideclSource = False
+#else
   , ideclSource = NotBoot
+#endif
   , ideclSafe = False
   , ideclQualified = QualifiedPre
   , ideclImplicit = True
