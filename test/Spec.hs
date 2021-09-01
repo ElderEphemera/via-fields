@@ -32,7 +32,10 @@ data T a b = T (Int via Sum Int) String a (b via Product b)
   deriving (Semigroup, Monoid) via Generically (T a b)
 
 -- | Coodinates ordered right-to-left, top-to-bottom
-data XY = XY { x :: Int via Down Int, y :: Int }
+data XY = XY
+  { x :: {-# UNPACK #-} !(Int via Down Int) -- ^ The X component
+  , y :: {-# UNPACK #-} !Int -- ^ The Y component
+  }
   deriving stock (Eq, Ord)
 
 --------------------------------------------------------------------------------

@@ -103,7 +103,7 @@ desugarDetailsGADT (RecConGADT fields) =
 
 desugarField :: ConDeclField GhcPs -> ([ConArg], ConDeclField GhcPs)
 desugarField field@(ConDeclField { cd_fld_names = names, cd_fld_type = ty }) =
-  let mkArgs ty' via = ConArg ty' via <$ names in
+  let mkArgs ty' via = ConArg (stripType ty') via <$ names in
   case splitVia ty of
     Nothing -> (mkArgs ty False, field)
     Just (ty', tyVia) ->
@@ -330,6 +330,8 @@ isVia (L _ (HsTyVar _ NotPromoted (L _ (Unqual via)))) = occNameFS via == viaFS
 isVia _ = False
 
 splitVia :: LHsType GhcPs -> Maybe (LHsType GhcPs, LHsType GhcPs)
+splitVia (L l (HsBangTy ext sb ty))
+  = fmap (L l . HsBangTy ext sb) <$> splitVia ty
 splitVia ty
   | let (f, xs) = splitHsAppTys ty
   , (lov, _via:g:rov) <- break isVia xs
@@ -343,6 +345,12 @@ splitHsAppTys ty = (ty, [])
 
 hsAppTys :: LHsType GhcPs -> [LHsType GhcPs] -> LHsType GhcPs
 hsAppTys f = gen . HsParTy eanu . foldl app f
+
+stripType :: LHsType GhcPs -> LHsType GhcPs
+stripType (L _ (HsParTy _ ty)) = stripType ty
+stripType (L _ (HsDocTy _ ty _)) = stripType ty
+stripType (L _ (HsBangTy _ _ ty)) = stripType ty
+stripType ty = ty
 
 app :: LHsType GhcPs -> LHsType GhcPs -> LHsType GhcPs
 app f x = gen $ HsAppTy nef f x
